@@ -1,0 +1,53 @@
+{
+  "name": "@arveniq/forge-sdk",
+  "version": "0.1.0",
+  "description": "Developer SDK for Arveniq Forge O/S governed tool package manifests and deployment APIs.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Arveniq Labs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arveniq-Labs/arveniq-forge-sdk.git"
+  },
+  "homepage": "https://github.com/Arveniq-Labs/arveniq-forge-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Arveniq-Labs/arveniq-forge-sdk/issues"
+  },
+  "keywords": [
+    "arveniq",
+    "forge",
+    "tool-packages",
+    "sdk",
+    "governance",
+    "agents"
+  ],
+  "bin": {
+    "forge-tool": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node bin/make-cli-executable.js",
+    "clean": "rm -rf dist",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

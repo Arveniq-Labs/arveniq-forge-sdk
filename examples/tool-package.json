@@ -1,0 +1,48 @@
+{
+  "name": "treasury-tools",
+  "namespace": "treasury",
+  "version": "1.0.0",
+  "description": "Treasury analytics tool handlers.",
+  "runtime": {
+    "type": "node",
+    "entrypoint": "src/index.ts"
+  },
+  "handlers": [
+    {
+      "handler_ref": "tool://treasury/calculate_cash_runway",
+      "slug": "calculate_cash_runway",
+      "name": "Calculate Cash Runway",
+      "description": "Calculates treasury runway from scoped balances and burn rate.",
+      "execution_mode": "read_only",
+      "risk_level": "medium",
+      "required_scopes": ["treasury.balance.read"],
+      "supported_environments": ["DEVELOPMENT", "STAGING"],
+      "approval_requirement": "none",
+      "input_schema": {
+        "type": "object",
+        "required": ["monthly_burn"],
+        "properties": {
+          "monthly_burn": { "type": "number" },
+          "currency": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["months_remaining"],
+        "properties": {
+          "months_remaining": { "type": "number" },
+          "currency": { "type": "string" }
+        }
+      },
+      "audit_policy": {
+        "audit_on_call": true,
+        "audit_input_metadata": true,
+        "audit_output_metadata": true,
+        "redact_input_fields": [],
+        "redact_output_fields": [],
+        "trace_visibility": "metadata",
+        "retention_policy_id": "standard"
+      }
+    }
+  ]
+}
