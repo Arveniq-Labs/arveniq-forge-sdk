@@ -4,6 +4,14 @@ import type {
   CreateToolPackageVersionInput,
   DeploymentEnvironment,
   ForgeClientOptions,
+  ForgeDeveloperAgent,
+  ForgeDeveloperRun,
+  ForgeDeveloperRunInput,
+  ForgeDeveloperTrace,
+  ForgeDeveloperWorkflow,
+  ForgeRateLimitState,
+  ForgeRequestOptions,
+  ForgeRunWaitOptions,
   ToolPackageDeployment,
   ToolPackageDetail,
   ToolPackageHandler,
@@ -17,24 +25,66 @@ export class ForgeApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly responseBody: string,
+    public readonly requestId?: string,
   ) {
     super(message);
+    this.name = 'ForgeApiError';
   }
 }
 
-export class ForgeToolPackagesClient {
+type ForgeRequestInit = ForgeRequestOptions & {
+  body?: string;
+  method?: string;
+};
+
+class ForgeServerClient {
   private readonly baseUrl: string;
   private readonly fetcher: typeof fetch;
-  private readonly apiKey?: string;
-  private readonly userId?: string;
+  private readonly apiKey: string;
+  private readonly userAgent?: string;
 
   constructor(options: ForgeClientOptions) {
-    if (!options.baseUrl.trim()) throw new Error('baseUrl is required.');
-    this.baseUrl = options.baseUrl.replace(/\/$/, '');
+    assertServerRuntime();
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.fetcher = options.fetcher ?? fetch;
-    this.apiKey = options.apiKey;
-    this.userId = options.userId;
+    this.apiKey = normalizeApiKey(options.apiKey);
+    this.userAgent = options.userAgent?.trim() || undefined;
   }
+
+  protected async request<T>(path: string, init: ForgeRequestInit = {}): Promise<T> {
+    const requestId = init.requestId ?? generatedRequestId();
+    const headers = new Headers();
+    if (init.body) headers.set('content-type', 'application/json');
+    headers.set('accept', 'application/json');
+    headers.set('authorization', `Bearer ${this.apiKey}`);
+    if (requestId) headers.set('x-request-id', requestId);
+    if (this.userAgent) headers.set('user-agent', this.userAgent);
+
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      ...(init.body ? { body: init.body } : {}),
+      ...(init.method ? { method: init.method } : {}),
+      ...(init.signal ? { signal: init.signal } : {}),
+      headers,
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new ForgeApiError(
+        `Forge API request failed with ${response.status}.`,
+        response.status,
+        body,
+        response.headers.get('x-request-id') ?? requestId,
+      );
+    }
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+}
+
+/**
+ * Client for the Forge Tool Package management API. Package deployment APIs
+ * are a separate control-plane capability from the public Developer API.
+ */
+export class ForgeToolPackagesClient extends ForgeServerClient {
 
   listPackages() {
     return this.request<{ items: ToolPackageSummary[] }>('/tool-packages');
@@ -148,21 +198,182 @@ export class ForgeToolPackagesClient {
     );
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers: Record<string, string> = {
-      ...(init.body ? { 'content-type': 'application/json' } : {}),
-      ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
-      ...(this.userId ? { 'x-forge-user-id': this.userId } : {}),
-      ...(init.headers as Record<string, string> | undefined),
-    };
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new ForgeApiError(`Forge API request failed with ${response.status}.`, response.status, body);
-    }
-    return (await response.json()) as T;
+}
+
+/**
+ * Server-only client for the scoped Forge Developer API. It authenticates the
+ * calling workload, not a browser user. Applications must resolve and authorize
+ * their own signed-in user and resources before invoking Forge.
+ */
+export class ForgeDeveloperClient extends ForgeServerClient {
+  listAgents(options: ForgeRequestOptions = {}) {
+    return this.request<{ items: ForgeDeveloperAgent[] }>('/developer/v1/agents', options);
   }
+
+  getAgent(agentId: string, options: ForgeRequestOptions = {}) {
+    return this.request<ForgeDeveloperAgent>(
+      `/developer/v1/agents/${requiredId(agentId, 'agentId')}`,
+      options,
+    );
+  }
+
+  listWorkflows(options: ForgeRequestOptions = {}) {
+    return this.request<{ items: ForgeDeveloperWorkflow[] }>('/developer/v1/workflows', options);
+  }
+
+  triggerAgentRun(
+    agentId: string,
+    input: ForgeDeveloperRunInput = {},
+    options: ForgeRequestOptions = {},
+  ) {
+    return this.request<ForgeDeveloperRun>(
+      `/developer/v1/agents/${requiredId(agentId, 'agentId')}/runs`,
+      {
+        ...options,
+        body: JSON.stringify(input),
+        method: 'POST',
+      },
+    );
+  }
+
+  triggerWorkflowRun(
+    workflowId: string,
+    input: ForgeDeveloperRunInput = {},
+    options: ForgeRequestOptions = {},
+  ) {
+    return this.request<ForgeDeveloperRun>(
+      `/developer/v1/workflows/${requiredId(workflowId, 'workflowId')}/runs`,
+      {
+        ...options,
+        body: JSON.stringify(input),
+        method: 'POST',
+      },
+    );
+  }
+
+  listRuns(options: ForgeRequestOptions = {}) {
+    return this.request<{ items: ForgeDeveloperRun[] }>('/developer/v1/runs', options);
+  }
+
+  getRun(runId: string, options: ForgeRequestOptions = {}) {
+    return this.request<ForgeDeveloperRun>(
+      `/developer/v1/runs/${requiredId(runId, 'runId')}`,
+      options,
+    );
+  }
+
+  getRunTrace(runId: string, options: ForgeRequestOptions = {}) {
+    return this.request<ForgeDeveloperTrace>(
+      `/developer/v1/runs/${requiredId(runId, 'runId')}/trace`,
+      options,
+    );
+  }
+
+  getRateLimits(options: ForgeRequestOptions = {}) {
+    return this.request<{ limits: ForgeRateLimitState[] }>('/developer/v1/rate-limit', options);
+  }
+
+  async waitForRun(runId: string, options: ForgeRunWaitOptions = {}): Promise<ForgeDeveloperRun> {
+    const pollIntervalMs = positiveInteger(options.pollIntervalMs, 1_000, 'pollIntervalMs');
+    const timeoutMs = positiveInteger(options.timeoutMs, 60_000, 'timeoutMs');
+    const deadline = Date.now() + timeoutMs;
+    const requestId = options.requestId;
+
+    while (true) {
+      const run = await this.getRun(runId, { requestId, signal: options.signal });
+      await options.onPoll?.(run);
+      if (isTerminalRunStatus(run.status)) return run;
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for Forge run ${runId} after ${timeoutMs} ms.`);
+      }
+      await wait(pollIntervalMs, options.signal);
+    }
+  }
+}
+
+function normalizeBaseUrl(value: string) {
+  const normalized = value.trim();
+  if (!normalized) throw new Error('baseUrl is required.');
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error('baseUrl must be an absolute HTTP(S) URL.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('baseUrl must use HTTP or HTTPS.');
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('baseUrl must not contain credentials, a query string, or a fragment.');
+  }
+  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+    throw new Error('baseUrl must use HTTPS unless it targets a loopback host.');
+  }
+  return url.toString().replace(/\/$/, '');
+}
+
+function normalizeApiKey(value: string) {
+  const normalized = value.trim().replace(/^Bearer\s+/i, '');
+  if (!normalized) throw new Error('apiKey is required.');
+  return normalized;
+}
+
+function assertServerRuntime() {
+  if (typeof window !== 'undefined' && typeof window.document !== 'undefined') {
+    throw new Error('Forge SDK clients are server-only. Do not expose Forge API keys in a browser.');
+  }
+}
+
+function generatedRequestId() {
+  return globalThis.crypto?.randomUUID?.();
+}
+
+function requiredId(value: string, name: string) {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${name} is required.`);
+  return encodeURIComponent(normalized);
+}
+
+function positiveInteger(value: number | undefined, defaultValue: number, name: string) {
+  const resolved = value ?? defaultValue;
+  if (!Number.isInteger(resolved) || resolved < 1) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return resolved;
+}
+
+function isTerminalRunStatus(status: string) {
+  return [
+    'approval_required',
+    'canceled',
+    'cancelled',
+    'completed',
+    'failed',
+    'succeeded',
+    'timed_out',
+    'waiting_approval',
+  ].includes(status.trim().toLowerCase());
+}
+
+function isLoopbackHost(hostname: string) {
+  const normalized = hostname.toLowerCase().replace(/\.$/, '');
+  return normalized === 'localhost' || normalized === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
+function wait(milliseconds: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('Forge request was aborted.'));
+      return;
+    }
+    const timer = setTimeout(resolve, milliseconds);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error('Forge request was aborted.'));
+      },
+      { once: true },
+    );
+  });
 }

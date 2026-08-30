@@ -33,6 +33,33 @@ export type AuditPolicy = {
   retention_policy_id: string | null;
 };
 
+export type CreateHandlerInput = {
+  handlerRef: string;
+  slug: string;
+  name: string;
+  description?: string;
+  executionMode?: ToolExecutionMode;
+  riskLevel?: RiskLevel;
+  requiredScopes: string[];
+  supportedEnvironments?: DeploymentEnvironment[];
+  approvalRequirement?: ApprovalRequirement;
+  inputSchema: JsonSchema;
+  outputSchema: JsonSchema;
+  auditPolicy?: Partial<AuditPolicy>;
+};
+
+export type ReadOnlyAuditPolicyOverrides = Omit<
+  Partial<AuditPolicy>,
+  'audit_on_call' | 'audit_input_metadata' | 'audit_output_metadata'
+>;
+
+export type CreateReadOnlyHandlerInput = Omit<
+  CreateHandlerInput,
+  'executionMode' | 'auditPolicy'
+> & {
+  auditPolicy?: ReadOnlyAuditPolicyOverrides;
+};
+
 export type ToolPackageHandlerManifest = {
   handler_ref: string;
   slug: string;
@@ -75,9 +102,117 @@ export type ValidationResult = {
 
 export type ForgeClientOptions = {
   baseUrl: string;
-  apiKey?: string;
-  userId?: string;
+  /** A scoped Forge Developer API key. Keep this server-side. */
+  apiKey: string;
   fetcher?: typeof fetch;
+  /** Added to requests when the runtime permits the User-Agent header. */
+  userAgent?: string;
+};
+
+export type ForgeRequestOptions = {
+  /** Correlates an application request with Forge audit and trace records. */
+  requestId?: string;
+  signal?: AbortSignal;
+};
+
+export type ForgeDeveloperAgent = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  category: string;
+  status: string;
+  riskLevel: RiskLevel | string;
+  project: {
+    id: string;
+    name: string;
+    organizationId: string;
+    workspaceId: string | null;
+  };
+  latestVersion: {
+    id: string;
+    status: string;
+    version: number;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ForgeDeveloperRunInput = {
+  /**
+   * An application-owned idempotency key. Reuse it only for retries of the
+   * same logical operation.
+   */
+  idempotencyKey?: string;
+  /**
+   * Agent input. Do not place browser-supplied user, account, or portfolio IDs
+   * here; those must be derived by a trusted server-side integration boundary.
+   */
+  input?: unknown;
+};
+
+/** The union of canonical AgentRun and legacy Execution statuses exposed by the Developer API. */
+export type ForgeDeveloperRunStatus =
+  | 'approval_required'
+  | 'canceled'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'timed_out'
+  | 'waiting_approval';
+
+export type ForgeDeveloperRun = {
+  id: string;
+  agentRunId: string | null;
+  legacyExecutionId: string | null;
+  agent: { id: string; name: string };
+  workflowName: string | null;
+  status: ForgeDeveloperRunStatus;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
+
+export type ForgeDeveloperWorkflow = {
+  id: string;
+  agentId: string;
+  agentName: string;
+  name: string;
+  slug: string;
+  status: string;
+  latestVersion: number | null;
+  updatedAt: string;
+};
+
+export type ForgeDeveloperTrace = {
+  run: ForgeDeveloperRun;
+  [key: string]: unknown;
+};
+
+export type ForgeRateLimitState = {
+  organizationId: string;
+  workspaceId: string | null;
+  apiKeyId: string | null;
+  windowSeconds: number;
+  requestLimit: number;
+  burstLimit: number | null;
+  currentUsage: number;
+  remaining: number;
+  resetAt: string;
+  exceeded: boolean;
+};
+
+export type ForgeRunWaitOptions = ForgeRequestOptions & {
+  /** Defaults to 1,000 ms. */
+  pollIntervalMs?: number;
+  /** Defaults to 60,000 ms. */
+  timeoutMs?: number;
+  onPoll?: (run: ForgeDeveloperRun) => void | Promise<void>;
 };
 
 export type CreateToolPackageInput = {

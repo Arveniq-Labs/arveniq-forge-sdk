@@ -1,6 +1,8 @@
 import type {
   ApprovalRequirement,
   AuditPolicy,
+  CreateHandlerInput,
+  CreateReadOnlyHandlerInput,
   DeploymentEnvironment,
   JsonSchema,
   RiskLevel,
@@ -14,6 +16,17 @@ import type {
 
 const handlerRefPattern = /^tool:\/\/([a-z0-9][a-z0-9-]*)\/([a-zA-Z0-9_.:-]+)$/;
 const namespacePattern = /^[a-z0-9][a-z0-9-]*$/;
+const executionModes: ToolExecutionMode[] = ['read_only', 'write', 'external_action'];
+const riskLevels: RiskLevel[] = ['low', 'medium', 'high', 'restricted'];
+const approvalRequirements: ApprovalRequirement[] = [
+  'none',
+  'always',
+  'policy_based',
+  'high_risk_only',
+];
+const deploymentEnvironments: DeploymentEnvironment[] = ['DEVELOPMENT', 'STAGING', 'PRODUCTION'];
+const runtimeTypes: ToolPackageRuntimeType[] = ['node', 'container', 'serverless', 'mcp', 'internal'];
+const traceVisibilities: AuditPolicy['trace_visibility'][] = ['summary', 'metadata', 'full_safe'];
 
 export function createAuditPolicy(overrides: Partial<AuditPolicy> = {}): AuditPolicy {
   return {
@@ -28,20 +41,7 @@ export function createAuditPolicy(overrides: Partial<AuditPolicy> = {}): AuditPo
   };
 }
 
-export function createHandler(input: {
-  handlerRef: string;
-  slug: string;
-  name: string;
-  description?: string;
-  executionMode?: ToolExecutionMode;
-  riskLevel?: RiskLevel;
-  requiredScopes: string[];
-  supportedEnvironments?: DeploymentEnvironment[];
-  approvalRequirement?: ApprovalRequirement;
-  inputSchema: JsonSchema;
-  outputSchema: JsonSchema;
-  auditPolicy?: Partial<AuditPolicy>;
-}): ToolPackageHandlerManifest {
+export function createHandler(input: CreateHandlerInput): ToolPackageHandlerManifest {
   return {
     approval_requirement: input.approvalRequirement ?? 'none',
     audit_policy: createAuditPolicy(input.auditPolicy),
@@ -55,6 +55,37 @@ export function createHandler(input: {
     risk_level: input.riskLevel ?? 'medium',
     slug: input.slug,
     supported_environments: input.supportedEnvironments ?? ['DEVELOPMENT'],
+  };
+}
+
+/**
+ * Creates a handler that cannot be configured to write or perform an external
+ * action. Use this for end-user data lookups and explanations.
+ */
+export function createReadOnlyHandler(
+  input: CreateReadOnlyHandlerInput,
+): ToolPackageHandlerManifest {
+  const { auditPolicy, ...handler } = input;
+  return createHandler({
+    ...handler,
+    auditPolicy: createAuditedReadOnlyPolicy(auditPolicy),
+    executionMode: 'read_only',
+  });
+}
+
+/**
+ * Read-only end-user data tools must retain a minimal audit trail. Redaction,
+ * retention, and trace visibility remain configurable, but audit collection is
+ * intentionally not optional.
+ */
+export function createAuditedReadOnlyPolicy(
+  overrides: CreateReadOnlyHandlerInput['auditPolicy'] = {},
+): AuditPolicy {
+  return {
+    ...createAuditPolicy(overrides),
+    audit_input_metadata: true,
+    audit_on_call: true,
+    audit_output_metadata: true,
   };
 }
 
@@ -99,6 +130,9 @@ export function validateManifest(manifest: unknown): ValidationResult {
     errors.push(issue('$.runtime', 'Runtime metadata is required.'));
   } else {
     stringField(manifest.runtime, 'entrypoint', errors, '$.runtime.entrypoint');
+    if (!runtimeTypes.includes(manifest.runtime.type as ToolPackageRuntimeType)) {
+      errors.push(issue('$.runtime.type', 'Runtime type is invalid.'));
+    }
   }
 
   if (!Array.isArray(manifest.handlers) || manifest.handlers.length === 0) {
@@ -138,6 +172,21 @@ export function validateManifest(manifest: unknown): ValidationResult {
     }
     if (!Array.isArray(handler.supported_environments) || handler.supported_environments.length === 0) {
       errors.push(issue(`${path}.supported_environments`, 'At least one supported environment is required.'));
+    } else if (
+      handler.supported_environments.some(
+        (environment) => !deploymentEnvironments.includes(environment as DeploymentEnvironment),
+      )
+    ) {
+      errors.push(issue(`${path}.supported_environments`, 'Supported environments must be valid Forge environments.'));
+    }
+    if (!executionModes.includes(handler.execution_mode as ToolExecutionMode)) {
+      errors.push(issue(`${path}.execution_mode`, 'Execution mode is invalid.'));
+    }
+    if (!riskLevels.includes(handler.risk_level as RiskLevel)) {
+      errors.push(issue(`${path}.risk_level`, 'Risk level is invalid.'));
+    }
+    if (!approvalRequirements.includes(handler.approval_requirement as ApprovalRequirement)) {
+      errors.push(issue(`${path}.approval_requirement`, 'Approval requirement is invalid.'));
     }
     if (!isJsonSchema(handler.input_schema)) errors.push(issue(`${path}.input_schema`, 'Input schema must be a JSON schema object.'));
     if (!isJsonSchema(handler.output_schema)) errors.push(issue(`${path}.output_schema`, 'Output schema must be a JSON schema object.'));
@@ -154,9 +203,7 @@ export function validateManifest(manifest: unknown): ValidationResult {
     if ((risk === 'high' || risk === 'restricted') && approval === 'none') {
       errors.push(issue(`${path}.approval_requirement`, 'High/restricted risk handlers require approval policy.'));
     }
-    if (!isRecord(handler.audit_policy)) {
-      warnings.push(issue(`${path}.audit_policy`, 'Audit policy should be explicit.', 'warning'));
-    }
+    validateAuditPolicy(handler.audit_policy, errors, `${path}.audit_policy`);
   });
 
   return result(errors, warnings);
@@ -193,6 +240,29 @@ function optionalStringField(
 
 function isJsonSchema(value: unknown): value is JsonSchema {
   return isRecord(value) && (typeof value.type === 'string' || Array.isArray(value.type));
+}
+
+function validateAuditPolicy(value: unknown, errors: ValidationIssue[], path: string) {
+  if (!isRecord(value)) {
+    errors.push(issue(path, 'Audit policy is required.'));
+    return;
+  }
+  for (const key of ['audit_on_call', 'audit_input_metadata', 'audit_output_metadata']) {
+    if (value[key] !== true) {
+      errors.push(issue(`${path}.${key}`, `${key} must be true for governed tool packages.`));
+    }
+  }
+  for (const key of ['redact_input_fields', 'redact_output_fields']) {
+    if (!Array.isArray(value[key]) || value[key].some((item) => typeof item !== 'string')) {
+      errors.push(issue(`${path}.${key}`, `${key} must be an array of field names.`));
+    }
+  }
+  if (!traceVisibilities.includes(value.trace_visibility as AuditPolicy['trace_visibility'])) {
+    errors.push(issue(`${path}.trace_visibility`, 'trace_visibility is invalid.'));
+  }
+  if (value.retention_policy_id !== null && typeof value.retention_policy_id !== 'string') {
+    errors.push(issue(`${path}.retention_policy_id`, 'retention_policy_id must be a string or null.'));
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,6 +1,6 @@
 {
   "name": "@arveniq/forge-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Developer SDK for Arveniq Forge O/S governed tool package manifests and deployment APIs.",
   "type": "module",
   "license": "Apache-2.0",

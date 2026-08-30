@@ -75,9 +75,8 @@ async function readManifest(path: string) {
 
 function createClient(flags: Record<string, string | undefined>) {
   return new ForgeToolPackagesClient({
-    apiKey: flags.apiKey ?? process.env.FORGE_API_KEY,
+    apiKey: required(flags.apiKey ?? process.env.FORGE_API_KEY, '--api-key or FORGE_API_KEY'),
     baseUrl: flags.baseUrl ?? process.env.FORGE_API_URL ?? 'http://localhost:4000/v1',
-    userId: flags.userId ?? process.env.FORGE_USER_ID,
   });
 }
 
@@ -120,7 +119,6 @@ Usage:
 
 Global flags:
   --base-url     Forge API base URL. Defaults to FORGE_API_URL or http://localhost:4000/v1.
-  --api-key      Forge API key. Defaults to FORGE_API_KEY.
-  --user-id      Forge user context header. Defaults to FORGE_USER_ID.
+  --api-key      Required scoped Forge API key. Defaults to FORGE_API_KEY.
 `);
 }
