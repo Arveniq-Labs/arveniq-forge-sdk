@@ -172,6 +172,8 @@ export type ForgeDeveloperRun = {
   workflowName: string | null;
   status: ForgeDeveloperRunStatus;
   error: string | null;
+  /** Sanitized answer on run detail/trace after success; null otherwise. Omitted by list/trigger summaries and older servers. */
+  finalAnswer?: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -213,6 +215,38 @@ export type ForgeRunWaitOptions = ForgeRequestOptions & {
   /** Defaults to 60,000 ms. */
   timeoutMs?: number;
   onPoll?: (run: ForgeDeveloperRun) => void | Promise<void>;
+};
+
+export type ForgeConversation = { id: string; agentId: string; createdAt: string };
+export type ForgeConversationSnapshot = ForgeConversation & {
+  turns: Array<{ id: string; clientMessageId: string; status: string; message: string; text: string; createdAt: string }>;
+};
+export type ForgeChatEvent = {
+  type: 'turn.accepted' | 'activity.updated' | 'response.started' | 'response.delta' |
+    'response.completed' | 'turn.requires_action' | 'turn.completed' | 'turn.failed' | 'turn.canceled';
+  version: 1;
+  conversationId: string;
+  turnId: string;
+  messageId: string;
+  eventId?: string;
+  sequence?: string;
+  createdAt: string;
+  data: { status?: string; message?: string; delta?: string; text?: string; replace?: boolean; phase?: string; code?: string };
+};
+export type ForgeChatStreamOptions = ForgeRequestOptions & {
+  afterEventId?: string;
+  /** Total reconnect attempts; defaults to 5. Zero disables reconnection. */
+  maxReconnects?: number;
+  /** Initial backoff; defaults to 500 ms and increases up to 10 seconds. */
+  reconnectDelayMs?: number;
+};
+export type ForgeChatState = {
+  text: string;
+  turnId?: string;
+  status?: string;
+  activity?: string;
+  lastEventId?: string;
+  lastSequence?: string;
 };
 
 export type CreateToolPackageInput = {

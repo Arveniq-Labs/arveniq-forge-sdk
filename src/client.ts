@@ -1,4 +1,6 @@
 import { assertValidManifest } from './manifest.js';
+import { ForgeStreamError, readChatEvents, isChatTurnSettled } from './chat-stream.js';
+import type { ForgeChatEvent, ForgeChatStreamOptions, ForgeConversation, ForgeConversationSnapshot } from './types.js';
 import type {
   CreateToolPackageInput,
   CreateToolPackageVersionInput,
@@ -35,6 +37,8 @@ export class ForgeApiError extends Error {
 type ForgeRequestInit = ForgeRequestOptions & {
   body?: string;
   method?: string;
+  accept?: string;
+  lastEventId?: string;
 };
 
 class ForgeServerClient {
@@ -52,10 +56,17 @@ class ForgeServerClient {
   }
 
   protected async request<T>(path: string, init: ForgeRequestInit = {}): Promise<T> {
+    const response = await this.requestResponse(path, init);
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+
+  protected async requestResponse(path: string, init: ForgeRequestInit = {}): Promise<Response> {
     const requestId = init.requestId ?? generatedRequestId();
     const headers = new Headers();
     if (init.body) headers.set('content-type', 'application/json');
-    headers.set('accept', 'application/json');
+    headers.set('accept', init.accept ?? 'application/json');
+    if (init.lastEventId) headers.set('last-event-id', init.lastEventId);
     headers.set('authorization', `Bearer ${this.apiKey}`);
     if (requestId) headers.set('x-request-id', requestId);
     if (this.userAgent) headers.set('user-agent', this.userAgent);
@@ -75,8 +86,7 @@ class ForgeServerClient {
         response.headers.get('x-request-id') ?? requestId,
       );
     }
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    return response;
   }
 }
 
@@ -206,6 +216,70 @@ export class ForgeToolPackagesClient extends ForgeServerClient {
  * their own signed-in user and resources before invoking Forge.
  */
 export class ForgeDeveloperClient extends ForgeServerClient {
+  createConversation(input: { agentId: string }, options: ForgeRequestOptions = {}) {
+    return this.request<ForgeConversation>('/developer/v1/conversations', { ...options, method: 'POST', body: JSON.stringify(input) });
+  }
+
+  getConversation(conversationId: string, options: ForgeRequestOptions = {}) {
+    return this.request<ForgeConversationSnapshot>(`/developer/v1/conversations/${requiredId(conversationId, 'conversationId')}`, options);
+  }
+
+  streamMessage(conversationId: string, input: { clientMessageId: string; message: string }, options: ForgeChatStreamOptions = {}) {
+    if (!input.clientMessageId.trim()) throw new Error('clientMessageId is required for safe retries.');
+    return this.chatStream(conversationId, undefined, input, options);
+  }
+
+  streamConversationTurn(conversationId: string, turnId: string, options: ForgeChatStreamOptions = {}) {
+    requiredId(turnId, 'turnId');
+    return this.chatStream(conversationId, turnId, undefined, options);
+  }
+
+  cancelConversationTurn(conversationId: string, turnId: string, options: ForgeRequestOptions = {}) {
+    return this.request<{ conversationId: string; turnId: string }>(`/developer/v1/conversations/${requiredId(conversationId, 'conversationId')}/turns/${requiredId(turnId, 'turnId')}/cancel`, { ...options, method: 'POST' });
+  }
+
+  private async *chatStream(conversationId: string, turnId: string | undefined, input: { clientMessageId: string; message: string } | undefined, options: ForgeChatStreamOptions): AsyncIterable<ForgeChatEvent> {
+    const base = `/developer/v1/conversations/${requiredId(conversationId, 'conversationId')}`;
+    const maxReconnects = options.maxReconnects ?? 5;
+    if (!Number.isInteger(maxReconnects) || maxReconnects < 0) throw new Error('maxReconnects must be a nonnegative integer.');
+    const delay = positiveInteger(options.reconnectDelayMs, 500, 'reconnectDelayMs');
+    let cursor = options.afterEventId;
+    let sequence: bigint | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      options.signal?.throwIfAborted();
+      try {
+        const response = await this.requestResponse(turnId ? `${base}/turns/${requiredId(turnId, 'turnId')}/events/stream` : `${base}/messages/stream`, {
+          requestId: options.requestId, signal: options.signal, accept: 'text/event-stream', lastEventId: cursor,
+          ...(turnId ? {} : { method: 'POST', body: JSON.stringify(input) }),
+        });
+        if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {
+          await response.body?.cancel();
+          throw new ForgeStreamError('Expected an SSE response from Forge.', 'stream_content_type_invalid');
+        }
+        for await (const event of readChatEvents(response.body)) {
+          if (event.conversationId !== conversationId || (turnId && event.turnId !== turnId)) throw new ForgeStreamError('Unexpected stream identity.', 'stream_event_invalid');
+          turnId = event.turnId;
+          if (event.sequence) {
+            const next = BigInt(event.sequence);
+            if (sequence !== undefined && next <= sequence) continue;
+            sequence = next;
+          }
+          if (event.eventId) cursor = event.eventId;
+          yield event;
+          if (isChatTurnSettled(event)) return;
+        }
+        throw new ForgeStreamError('Stream ended before the turn settled.');
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        const retryable = error instanceof ForgeApiError ? error.status === 429 || error.status >= 500
+          : error instanceof ForgeStreamError ? ['stream_interrupted', 'developer_stream_interrupted'].includes(error.code)
+          : error instanceof TypeError;
+        if (!retryable || attempt >= maxReconnects) throw error;
+        await wait(Math.min(10_000, delay * 2 ** attempt), options.signal);
+      }
+    }
+  }
+
   listAgents(options: ForgeRequestOptions = {}) {
     return this.request<{ items: ForgeDeveloperAgent[] }>('/developer/v1/agents', options);
   }
@@ -366,14 +440,8 @@ function wait(milliseconds: number, signal?: AbortSignal) {
       reject(signal.reason ?? new Error('Forge request was aborted.'));
       return;
     }
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason ?? new Error('Forge request was aborted.'));
-      },
-      { once: true },
-    );
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(signal?.reason ?? new Error('Forge request was aborted.')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, milliseconds);
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }

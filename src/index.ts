@@ -1,4 +1,6 @@
 export { ForgeApiError, ForgeDeveloperClient, ForgeToolPackagesClient } from './client.js';
+export { ForgeStreamError, reduceChatEvent } from './chat-stream.js';
+export type { ForgeChatEvent, ForgeChatStreamOptions, ForgeChatState, ForgeConversation, ForgeConversationSnapshot } from './types.js';
 export {
   assertValidManifest,
   createAuditPolicy,

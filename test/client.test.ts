@@ -147,11 +147,13 @@ test('clients reject missing workload credentials and malformed base URLs', () =
     /HTTP or HTTPS/,
   );
   assert.throws(
-    () => new ForgeDeveloperClient({ apiKey: 'forge_test_key', baseUrl: 'http://forge.example/v1' }),
+    () =>
+      new ForgeDeveloperClient({ apiKey: 'forge_test_key', baseUrl: 'http://forge.example/v1' }),
     /must use HTTPS/,
   );
   assert.doesNotThrow(
-    () => new ForgeDeveloperClient({ apiKey: 'forge_test_key', baseUrl: 'http://127.0.0.1:4000/v1' }),
+    () =>
+      new ForgeDeveloperClient({ apiKey: 'forge_test_key', baseUrl: 'http://127.0.0.1:4000/v1' }),
   );
 });
 
@@ -178,5 +180,35 @@ test('waitForRun returns every terminal status emitted by the Developer API', as
 
     const run = await client.waitForRun('run-1', { timeoutMs: 10 });
     assert.equal(run.status, status);
+  }
+});
+
+test('polling and trace preserve the completed final answer for canonical and legacy IDs', async () => {
+  for (const [id, status] of [
+    ['run-1', 'completed'],
+    ['execution-1', 'succeeded'],
+  ]) {
+    let polls = 0;
+    const client = new ForgeDeveloperClient({
+      apiKey: 'forge_test_key',
+      baseUrl: 'https://forge-os.io/v1',
+      fetcher: async (url, init) => {
+        assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer forge_test_key');
+        const isTrace = String(url).endsWith('/trace');
+        const run = {
+          id,
+          status: !isTrace && polls++ === 0 ? 'running' : status,
+          finalAnswer: null as string | null,
+        };
+        if (run.status === status) run.finalAnswer = 'Your lead summary is ready.';
+        return Response.json(isTrace ? { run, steps: [] } : run);
+      },
+    });
+    const pending = await client.getRun(id!);
+    assert.equal(pending.finalAnswer, null);
+    const complete = await client.waitForRun(id!, { pollIntervalMs: 1, timeoutMs: 100 });
+    assert.equal(complete.finalAnswer, 'Your lead summary is ready.');
+    const trace = await client.getRunTrace(id!);
+    assert.equal(trace.run.finalAnswer, complete.finalAnswer);
   }
 });
